@@ -1,0 +1,135 @@
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta charset="utf-8"/>
+  <title>Smart Cart Scanner</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;margin:0;display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px;background:#f6f7fb}
+    video{width:100%;max-width:420px;border-radius:10px;background:#000}
+    #status{padding:8px;border-radius:8px;background:#111;color:#fff;width:100%;max-width:420px;text-align:center}
+    .small{font-size:13px;color:#666}
+    #cart{width:100%;max-width:420px;background:#fff;border-radius:8px;padding:8px;box-shadow:0 6px 18px rgba(0,0,0,0.08);margin-top:8px}
+    .item{display:flex;justify-content:space-between;padding:6px 4px;border-bottom:1px solid #eee}
+  </style>
+</head>
+<body>
+<h3>Smart Cart — Scanner</h3>
+<video id="video" autoplay playsinline muted></video>
+<div id="status">initialising…</div>
+<div class="small">hold phone steady · use back camera</div>
+<div id="cart" hidden><strong>Recent scans</strong><div id="items"></div></div>
+
+<script type="module">
+  // ---------- CONFIG ----------
+  // Runtime override with ?pi= allowed. Default posts to your ngrok tunnel.
+  const PI_ADD_URL = (new URLSearchParams(location.search).get('pi')) || 'https://hypogeal-flynn-clamorous.ngrok-free.dev/add_item';
+
+  // mapping: barcode -> { name, price }
+  const products = {
+    "8913000": { name: "Milk",  price: 60 },
+    "8913001": { name: "Butter", price: 80 }
+  };
+
+  const video = document.getElementById('video');
+  const status = document.getElementById('status');
+  const cartEl = document.getElementById('cart');
+  const itemsEl = document.getElementById('items');
+
+  function addToLocalCart(name, price){
+    cartEl.hidden = false;
+    const div = document.createElement('div'); div.className='item';
+    const n = document.createElement('div'); n.textContent = name;
+    const p = document.createElement('div'); p.textContent = '₹' + price;
+    div.appendChild(n); div.appendChild(p);
+    itemsEl.prepend(div);
+    while(itemsEl.children.length > 8) itemsEl.removeChild(itemsEl.lastChild);
+  }
+
+  async function postAddItem(name, price){
+    try {
+      const body = { name: String(name), price: Math.round(Number(price) || 0) };
+      const res = await fetch(PI_ADD_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if(!res.ok){
+        const t = await res.text();
+        throw new Error('server ' + res.status + ' ' + t);
+      }
+      status.textContent = `sent → ${body.name} ₹${body.price}`;
+      addToLocalCart(body.name, body.price);
+    } catch (err) {
+      console.error(err);
+      status.textContent = 'send failed — check PI & CORS';
+    }
+  }
+
+  async function handleDetected(raw){
+    const entry = products[String(raw)];
+    if(entry){
+      status.textContent = `scanned: ${entry.name} ₹${entry.price}`;
+      await postAddItem(entry.name, entry.price);
+    } else {
+      status.textContent = `unknown: ${raw} → sending with price 0`;
+      await postAddItem(raw, 0);
+    }
+    await new Promise(r => setTimeout(r, 700));
+  }
+
+  // Native BarcodeDetector loop
+  async function startNative(){
+    const formats = await BarcodeDetector.getSupportedFormats();
+    const detector = new BarcodeDetector({ formats });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+    video.srcObject = stream;
+    const loop = async () => {
+      try {
+        const results = await detector.detect(video);
+        if (results && results.length) await handleDetected(results[0].rawValue);
+      } catch(e){}
+      requestAnimationFrame(loop);
+    };
+    loop();
+  }
+
+  // ZXing fallback
+  async function startZXing(){
+    const { BrowserMultiFormatReader } = await import('https://unpkg.com/@zxing/library@0.19.1/esm/index.js');
+    const codeReader = new BrowserMultiFormatReader();
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+    video.srcObject = stream;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const loop = async () => {
+      try {
+        if (video.videoWidth === 0) { requestAnimationFrame(loop); return; }
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const result = await codeReader.decodeOnceFromCanvas(canvas);
+        if (result && result.getText) await handleDetected(result.getText());
+      } catch(e){}
+      requestAnimationFrame(loop);
+    };
+    loop();
+  }
+
+  (async () => {
+    try {
+      await navigator.mediaDevices.getUserMedia({ video: true });
+      if ('BarcodeDetector' in window) {
+        status.textContent = 'using native BarcodeDetector';
+        await startNative();
+      } else {
+        status.textContent = 'using ZXing fallback';
+        await startZXing();
+      }
+    } catch (e) {
+      console.error(e);
+      status.textContent = 'camera denied or unsupported';
+    }
+  })();
+</script>
+</body>
+</html>
