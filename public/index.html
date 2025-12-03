@@ -4,18 +4,17 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Smart Cart Scanner</title>
-  <meta name="description" content="Mobile barcode scanner for Smart Cart" />
 
   <style>
     body {
       font-family: system-ui, Roboto, Arial;
-      margin: 12px;
+      margin: 0;
+      padding: 16px;
       background: #f6f7fb;
-      color: #111;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 10px;
+      color: #111;
     }
 
     #video {
@@ -24,109 +23,97 @@
       height: auto;
       background: #000;
       border-radius: 10px;
+      object-fit: cover;
+      position: relative;
+      z-index: 1000;
+      margin-top: 14px;
     }
 
     #status {
-      font-size: 16px;
+      margin-top: 12px;
+      font-size: 18px;
       font-weight: 500;
-      padding: 6px 10px;
-      background: #fff3cd;
-      border: 1px solid #ffeeba;
-      border-radius: 6px;
-      width: 90vw;
-      max-width: 420px;
-      text-align: center;
     }
 
     #controls {
+      margin-top: 16px;
       display: flex;
-      gap: 10px;
-      width: 90vw;
-      max-width: 420px;
-      justify-content: space-between;
+      gap: 14px;
     }
 
     button {
-      padding: 10px 16px;
-      font-size: 15px;
-      background: #007bff;
-      color: white;
-      border: none;
+      padding: 10px 14px;
+      font-size: 16px;
       border-radius: 8px;
-      cursor: pointer;
-    }
-
-    #upload {
-      margin-top: 10px;
+      border: none;
+      background: #0078ff;
+      color: white;
     }
 
     #items {
+      margin-top: 18px;
       width: 90vw;
       max-width: 420px;
-      background: #fff;
-      padding: 10px;
-      border-radius: 8px;
-      border: 1px solid #eee;
+      background: white;
+      border-radius: 10px;
+      padding: 12px;
       display: none;
     }
 
     #items-list .item {
       display: flex;
       justify-content: space-between;
-      padding: 6px 4px;
+      padding: 6px 0;
       border-bottom: 1px solid #eee;
     }
 
     #console {
+      white-space: pre-wrap;
+      background: #000;
+      color: #0f0;
+      padding: 10px;
+      margin-top: 16px;
       width: 90vw;
       max-width: 420px;
-      background: #111;
-      color: #0f0;
-      font-family: monospace;
-      padding: 10px;
-      border-radius: 6px;
-      max-height: 30vh;
-      overflow-y: auto;
       font-size: 12px;
+      border-radius: 6px;
+      height: 120px;
+      overflow-y: auto;
+    }
+
+    /* hidden upload input */
+    #upload {
+      display: none;
     }
   </style>
 </head>
-
 <body>
 
-<h2>📷 Smart Cart Scanner</h2>
+<h2>Smart Cart Scanner</h2>
 
-<!-- Camera feed -->
+<!-- Video (live preview) -->
 <video id="video" autoplay playsinline muted></video>
 
-<!-- Status box -->
 <div id="status">initialising…</div>
 
-<!-- Buttons -->
 <div id="controls">
-  <button id="btn-retry">Retry camera</button>
-  <button id="btn-switch">Switch camera</button>
+  <button id="btn-retry">Retry</button>
+  <button id="btn-switch">Switch Cam</button>
+  <button id="btn-snap">Capture ▶︎ Pi</button>
+  <button id="btn-upload">Upload</button>
 </div>
 
-<button id="btn-capture">Capture & send to Pi</button>
-<script>
-  document.getElementById('btn-capture').addEventListener('click', sendSnapshotToPi);
-</script>
+<input id="upload" type="file" accept="image/*" />
 
-<!-- File upload fallback -->
-<input id="upload" type="file" accept="image/*">
+<div id="items"><div id="items-list"></div></div>
 
-<!-- Scanned items list -->
-<div id="items">
-  <h3>Scanned Items</h3>
-  <div id="items-list"></div>
-</div>
+<div id="console"></div>
 
-<!-- Debug console -->
-<pre id="console"></pre>
+<!-- Product mapping -->
+<script src="/products.js"></script>
 
-<!-- Load scanner.js from public/ -->
-<script type="module" src="./scanner.js"></script>
+<!-- Scanner logic -->
+<script src="/scanner.js"></script>
 
 </body>
 </html>
