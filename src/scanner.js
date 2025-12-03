@@ -103,42 +103,77 @@ function stopCamera() {
 let liveTimer = null;
 let lastDecoded = null;
 
+// ---------- robust live decode (replace previous live decode) ----------
 async function startLiveDecode() {
-    await ensureReader();
-    if (!video || !video.srcObject) {
-        status.textContent = 'camera not running';
-        return;
+    // If native API exists, use it (fast)
+    if ('BarcodeDetector' in window) {
+        try {
+            const formats = await BarcodeDetector.getSupportedFormats();
+            const detector = new BarcodeDetector({ formats });
+            status.textContent = 'scanning (native)…';
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            if(liveTimer){ clearInterval(liveTimer); liveTimer = null; }
+            liveTimer = setInterval(async () => {
+                try {
+                    if (video.readyState < 2) return;
+                    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    const results = await detector.detect(canvas);
+                    if (results && results.length) {
+                        const raw = results[0].rawValue || results[0].rawText || results[0].raw;
+                        if (raw && raw !== lastDecoded) { lastDecoded = raw; await handleDetected(raw); }
+                    }
+                } catch (e) { /* ignore per-frame */ }
+            }, 300);
+            return;
+        } catch (e) {
+            log('native BarcodeDetector failed, falling back to ZXing', e);
+        }
     }
+
+    // Fallback: ensure ZXing UMD is loaded
+    await ensureReader(); // loads UMD and sets global codeReader
+    status.textContent = 'scanning (zxing)…';
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    const throttleMs = 300;
-
-    stopLiveDecode();
-    status.textContent = 'scanning...';
-
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
     liveTimer = setInterval(async () => {
         try {
             if (video.readyState < 2) return;
             canvas.width = video.videoWidth || 640;
             canvas.height = video.videoHeight || 480;
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // prefer decodeOnceFromCanvas if exposed, else try decodeFromCanvas
+            let result = null;
             try {
-                const result = await codeReader.decodeFromCanvas(canvas);
-                if (result && result.getText) {
-                    const raw = result.getText();
-                    if (raw !== lastDecoded) {
-                        lastDecoded = raw;
-                        await handleDetected(raw);
-                    }
+                if (codeReader && typeof codeReader.decodeOnceFromCanvas === 'function') {
+                    result = await codeReader.decodeOnceFromCanvas(canvas);
+                } else if (codeReader && typeof codeReader.decodeFromCanvas === 'function') {
+                    result = await codeReader.decodeFromCanvas(canvas);
+                } else if (window.ZXing && ZXing.BrowserMultiFormatReader) {
+                    // construct a temporary reader if needed
+                    const tmp = new ZXing.BrowserMultiFormatReader();
+                    if (typeof tmp.decodeFromCanvas === 'function') result = await tmp.decodeFromCanvas(canvas);
+                    else if (typeof tmp.decodeOnceFromCanvas === 'function') result = await tmp.decodeOnceFromCanvas(canvas);
+                } else {
+                    // no decode function available
                 }
-            } catch (_) {
-                // expected - many frames won't decode
+            } catch (err) {
+                // normal per-frame decode failures: ignore
+            }
+
+            if (result && (result.text || result.getText && result.getText())) {
+                const raw = result.text || (result.getText && result.getText());
+                if (raw && raw !== lastDecoded) { lastDecoded = raw; await handleDetected(raw); }
             }
         } catch (e) {
-            log('live loop error', e);
+            log('live loop err', e);
         }
-    }, throttleMs);
+    }, 300);
 }
+
 
 function stopLiveDecode() {
     if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
