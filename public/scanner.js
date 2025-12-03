@@ -1,13 +1,12 @@
-// scanner.js (final — cleaned & fixed)
-// Place next to index.html and products.js
+// scanner.js — Quagga-based (robust for Code128)
+// Place at public/scanner.js (overwrite previous)
 
 import { products } from './products.js';
 
-// CONFIG: default PI endpoint (override at runtime with ?pi=)
 const DEFAULT_PI = 'https://hypogeal-flynn-clamorous.ngrok-free.dev/add_item';
 const PI_ADD_URL = (new URLSearchParams(location.search).get('pi')) || DEFAULT_PI;
 
-// UI
+// UI refs
 const video = document.getElementById('video');
 const status = document.getElementById('status');
 const consoleEl = document.getElementById('console');
@@ -17,317 +16,225 @@ const upload = document.getElementById('upload');
 const itemsBox = document.getElementById('items');
 const itemsList = document.getElementById('items-list');
 
-function log(...args) {
-    console.log(...args);
-    if (!consoleEl) return;
-    consoleEl.textContent += args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ') + '\n';
-    consoleEl.scrollTop = consoleEl.scrollHeight;
-}
+function log(...a){ console.log(...a); if(consoleEl) consoleEl.textContent += a.join(' ') + '\n'; }
 
-// dynamic script loader
-function loadScript(url) {
-    return new Promise((resolve, reject) => {
-        if (document.querySelector(`script[src="${url}"]`)) return resolve();
-        const s = document.createElement('script');
-        s.src = url;
-        s.async = true;
-        s.onload = () => resolve();
-        s.onerror = (e) => reject(new Error('Failed to load ' + url));
+// load Quagga UMD
+function loadQuagga(){
+    return new Promise((res,rej)=>{
+        if(window.Quagga) return res(window.Quagga);
+        const s=document.createElement('script');
+        s.src = 'https://unpkg.com/quagga@0.12.1/dist/quagga.min.js';
+        s.onload = ()=> res(window.Quagga);
+        s.onerror = (e)=> rej(new Error('Quagga load failed'));
         document.head.appendChild(s);
     });
 }
 
-// ZXing UMD reader holder
-let codeReader = null;
-async function ensureReader() {
-    if (codeReader) return codeReader;
-    await loadScript('https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js');
-    try {
-        codeReader = new ZXing.BrowserMultiFormatReader();
-    } catch (e) {
-        codeReader = null;
-    }
-    return codeReader;
-}
-
-// devices + camera
-let deviceList = [];
-let usingIndex = 0;
-let stream = null;
-let liveTimer = null;
-let lastDecoded = null;
-
-async function enumerateDevices() {
-    try {
-        const devs = await navigator.mediaDevices.enumerateDevices();
-        deviceList = devs.filter(d => d.kind === 'videoinput');
-        log('video devices:', deviceList.map(d => d.label || d.deviceId));
-    } catch (e) {
-        log('enumerateDevices failed', e);
-    }
-}
-
-async function pickDevicePreferRear() {
-    // ensure devices are enumerated
-    if (deviceList.length === 0) await enumerateDevices();
-    if (!deviceList.length) return null;
-
-    const lower = deviceList.map(d => ({ deviceId: d.deviceId, label: (d.label || '').toLowerCase() }));
-    const prefer = lower.find(d => /back|rear|environment|camera 0|camera 1/.test(d.label));
-    if (prefer) return prefer.deviceId;
-    return deviceList[deviceList.length - 1].deviceId;
-}
-
-async function startCamera(deviceId = null) {
-    stopCamera();
-    status.textContent = 'requesting camera...';
-    try {
-        const constraints = deviceId
-            ? { video: { deviceId: { exact: deviceId } } }
-            : { video: { facingMode: { ideal: 'environment' } } };
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject = stream;
-        await video.play();
-        status.textContent = 'camera live';
-        log('camera started');
-        return true;
-    } catch (e) {
-        log('startCamera failed', e);
-        status.textContent = 'camera error — check permission';
-        return false;
-    }
-}
-
-function stopCamera() {
-    if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-        stream = null;
-    }
-    try { video.srcObject = null; } catch (e) {}
-}
-
-function stopLiveDecode() {
-    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
-}
-
-// ---------- robust live decode (replace previous startLiveDecode) ----------
-async function startLiveDecode() {
-    stopLiveDecode();
-    await ensureReader(); // ensure ZXing loaded (no-op if native path used below)
-
-    // prefer native if available
-    if ('BarcodeDetector' in window) {
-        try {
-            const formats = await BarcodeDetector.getSupportedFormats();
-            const detector = new BarcodeDetector({ formats });
-            status.textContent = 'scanning (native)…';
-            log('Live: using native BarcodeDetector');
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            liveTimer = setInterval(async () => {
-                try {
-                    if (video.readyState < 2) return;
-                    // crop center region
-                    const vw = video.videoWidth, vh = video.videoHeight;
-                    const cw = Math.floor(vw * 0.7), ch = Math.floor(vh * 0.5);
-                    const sx = Math.floor((vw - cw) / 2), sy = Math.floor((vh - ch) / 2);
-                    canvas.width = cw; canvas.height = ch;
-                    ctx.drawImage(video, sx, sy, cw, ch, 0, 0, cw, ch);
-                    const results = await detector.detect(canvas);
-                    if (results && results.length) {
-                        const raw = results[0].rawValue || results[0].rawText || results[0].raw;
-                        if (raw && raw !== lastDecoded) { lastDecoded = raw; await handleDetected(raw); }
-                    }
-                } catch (e) { /* ignore frame errors */ }
-            }, 400);
-            return;
-        } catch (e) {
-            log('Live: native failed, falling back to ZXing', e);
-        }
-    }
-
-    // ZXing fallback
-    status.textContent = 'scanning (zxing)…';
-    log('Live: using ZXing fallback');
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const throttleMs = 450; // slightly slower so autofocus settles
-    liveTimer = setInterval(async () => {
-        try {
-            if (video.readyState < 2) return;
-            const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
-            // crop center region for speed and reliability
-            const cw = Math.floor(vw * 0.7), ch = Math.floor(vh * 0.5);
-            const sx = Math.floor((vw - cw) / 2), sy = Math.floor((vh - ch) / 2);
-            // upscale crop to help decoder
-            const upscale = 2;
-            canvas.width = cw * upscale; canvas.height = ch * upscale;
-            ctx.drawImage(video, sx, sy, cw, ch, 0, 0, canvas.width, canvas.height);
-
-            let result = null;
-            try {
-                if (codeReader && typeof codeReader.decodeOnceFromCanvas === 'function') {
-                    result = await codeReader.decodeOnceFromCanvas(canvas);
-                } else if (codeReader && typeof codeReader.decodeFromCanvas === 'function') {
-                    result = await codeReader.decodeFromCanvas(canvas);
-                } else if (window.ZXing && ZXing.BrowserMultiFormatReader) {
-                    const tmp = new ZXing.BrowserMultiFormatReader();
-                    if (typeof tmp.decodeFromCanvas === 'function') result = await tmp.decodeFromCanvas(canvas);
-                    else if (typeof tmp.decodeOnceFromCanvas === 'function') result = await tmp.decodeOnceFromCanvas(canvas);
-                }
-            } catch (err) {
-                // expected many frame failures
-                // log occasional errors to help debug (throttle logs)
-                if (Math.random() < 0.02) log('Live decode frame error (sample):', err && err.name ? err.name : err);
-            }
-
-            if (result && (result.text || (result.getText && result.getText()))) {
-                const raw = result.text || (result.getText && result.getText());
-                if (raw && raw !== lastDecoded) {
-                    lastDecoded = raw;
-                    log('Live: decoded ->', raw);
-                    await handleDetected(raw);
-                }
-            }
-        } catch (e) {
-            log('Live loop err', e);
-        }
-    }, throttleMs);
-}
-
-// UI helpers
-function showScan(name, price) {
-    if (!itemsBox) return;
-    itemsBox.hidden = false;
-    const div = document.createElement('div'); div.className = 'item';
+// show item list
+function showScan(name, price){
+    if(!itemsBox) return;
+    itemsBox.style.display = 'block';
+    const div = document.createElement('div'); div.className='item';
     const n = document.createElement('div'); n.textContent = name;
     const p = document.createElement('div'); p.textContent = '₹' + price;
     div.appendChild(n); div.appendChild(p);
     itemsList.prepend(div);
-    while (itemsList.children.length > 8) itemsList.removeChild(itemsList.lastChild);
+    while(itemsList.children.length > 8) itemsList.removeChild(itemsList.lastChild);
 }
 
-// POST to Pi
-async function postAddItem(name, price) {
-    try {
-        const body = { name: String(name), price: Math.round(Number(price) || 0) };
-        const res = await fetch(PI_ADD_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-            const t = await res.text().catch(() => '<no body>');
-            throw new Error('server ' + res.status + ' ' + t);
-        }
+// post to PI
+async function postAddItem(name, price){
+    try{
+        const body = { name: String(name), price: Math.round(Number(price)||0) };
+        const res = await fetch(PI_ADD_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+        if(!res.ok) { const t = await res.text().catch(()=>'<no body>'); throw new Error('server ' + res.status + ' ' + t); }
         log('posted', body);
         showScan(body.name, body.price);
         status.textContent = `sent → ${body.name} ₹${body.price}`;
-    } catch (err) {
+    }catch(err){
         log('post failed', err);
         status.textContent = 'post failed — check PI & CORS';
     }
 }
 
-// detection handler
-async function handleDetected(raw) {
-    log('detected', raw);
-    const entry = products[String(raw)];
-    if (entry) {
-        await postAddItem(entry.name, entry.price);
-    } else {
-        await postAddItem(raw, 0);
+// handle detected code string
+async function handleDetected(code){
+    log('detected', code);
+    const entry = products[String(code)];
+    if(entry) await postAddItem(entry.name, entry.price);
+    else await postAddItem(code, 0);
+}
+
+// START LIVE SCANNER using Quagga
+let quaggaActive = false;
+let currentDeviceId = null;
+async function startLiveQuagga(deviceId = null){
+    try{
+        const Quagga = await loadQuagga();
+        // stop first if running
+        try{ Quagga.stop(); }catch(e){}
+        // config
+        const constraints = deviceId ? { deviceId: deviceId } : { facingMode: 'environment' };
+        const config = {
+            inputStream: {
+                type: "LiveStream",
+                constraints: {
+                    ...constraints,
+                    width: { min: 640, ideal: 1280 },
+                    height: { min: 480, ideal: 720 },
+                },
+                target: video, // the video element
+                singleChannel: false
+            },
+            locator: { patchSize: "medium", halfSample: true },
+            numOfWorkers: navigator.hardwareConcurrency ? Math.max(1, navigator.hardwareConcurrency-1) : 1,
+            decoder: { readers: ["code_128_reader","ean_reader","ean_8_reader","code_39_reader","upc_reader"] },
+            locate: true
+        };
+
+        Quagga.init(config, function(err){
+            if(err){
+                log('Quagga init error', err);
+                status.textContent = 'quagga init error';
+                return;
+            }
+            Quagga.start();
+            quaggaActive = true;
+            status.textContent = 'scanning (quagga)…';
+            log('Quagga started');
+        });
+
+        // on detected
+        Quagga.offDetected(); // ensure single handler
+        Quagga.onDetected(function(data){
+            try{
+                if(!data || !data.codeResult || !data.codeResult.code) return;
+                const code = data.codeResult.code;
+                // debounce double detections
+                if(window.__lastQuagga === code) return;
+                window.__lastQuagga = code;
+                setTimeout(()=>{ window.__lastQuagga = null; }, 900);
+                log('Quagga detected', code);
+                handleDetected(code);
+            }catch(e){ log('onDetected err', e); }
+        });
+
+        Quagga.onProcessed(function(result){
+            // optional: we could draw bounding boxes for debug
+        });
+
+        // remember Quagga globally if needed
+        window.__Quagga = Quagga;
+    }catch(e){
+        log('startLiveQuagga failed', e);
+        status.textContent = 'camera error — check permission';
     }
 }
 
-// ---------- robust upload decode (replace existing upload handler) ----------
-upload.addEventListener('change', async (ev) => {
+function stopLiveQuagga(){
+    try{
+        if(window.__Quagga && window.__Quagga.stop) window.__Quagga.stop();
+    }catch(e){}
+    quaggaActive = false;
+}
+
+// upload handler using Quagga.decodeSingle (with rotations / upscale)
+upload.addEventListener('change', async (ev)=>{
     const f = ev.target.files && ev.target.files[0];
-    if (!f) return;
-    log('Upload: file selected', f.name, f.size);
-    const img = new Image();
-    img.src = URL.createObjectURL(f);
-    await new Promise(r => img.onload = r);
-    // try multiple attempts: upscale and rotate if needed
-    const tryRotations = [0, 90, 270];
-    let decoded = null;
-    await ensureReader();
-    for (const rot of tryRotations) {
-        // create canvas with upscale to help decode
-        const scale = 3; // bigger helps ZXing
-        let w = img.naturalWidth;
-        let h = img.naturalHeight;
+    if(!f) return;
+    log('Upload selected', f.name, f.size);
+    // prepare image element
+    const img = new Image(); img.src = URL.createObjectURL(f);
+    await new Promise(r=>img.onload=r);
+    // try multiple rotations
+    const rotations = [0,0,90,270]; // try 0 twice to handle orientation flags
+    for(const rot of rotations){
+        // draw rotated to canvas
         const canvas = document.createElement('canvas');
-        if (rot === 90 || rot === 270) { canvas.width = h * scale; canvas.height = w * scale; }
-        else { canvas.width = w * scale; canvas.height = h * scale; }
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if(rot === 90 || rot === 270){ canvas.width = h; canvas.height = w; }
+        else { canvas.width = w; canvas.height = h; }
         const ctx = canvas.getContext('2d');
-        // draw rotated
         ctx.save();
-        if (rot === 90) { ctx.translate(canvas.width, 0); ctx.rotate(Math.PI/2); ctx.drawImage(img, 0, 0, h*scale, w*scale); }
-        else if (rot === 270) { ctx.translate(0, canvas.height); ctx.rotate(-Math.PI/2); ctx.drawImage(img, 0, 0, h*scale, w*scale); }
-        else { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); }
+        if(rot === 90){ ctx.translate(canvas.width,0); ctx.rotate(Math.PI/2); ctx.drawImage(img,0,0); }
+        else if(rot === 270){ ctx.translate(0,canvas.height); ctx.rotate(-Math.PI/2); ctx.drawImage(img,0,0); }
+        else ctx.drawImage(img,0,0);
         ctx.restore();
 
-        log(`Upload: trying rotation ${rot}°, canvas ${canvas.width}x${canvas.height}`);
-
-        // try codeReader methods
-        try {
-            if (codeReader && typeof codeReader.decodeOnceFromCanvas === 'function') {
-                decoded = await codeReader.decodeOnceFromCanvas(canvas).catch(e => { throw e; });
-            } else if (codeReader && typeof codeReader.decodeFromCanvas === 'function') {
-                decoded = await codeReader.decodeFromCanvas(canvas).catch(e => { throw e; });
-            } else if (window.ZXing && ZXing.BrowserMultiFormatReader) {
-                const tmp = new ZXing.BrowserMultiFormatReader();
-                if (typeof tmp.decodeFromCanvas === 'function') decoded = await tmp.decodeFromCanvas(canvas);
-                else if (typeof tmp.decodeOnceFromCanvas === 'function') decoded = await tmp.decodeOnceFromCanvas(canvas);
-            }
-        } catch (e) {
-            log('Upload: decode attempt failed (rotation ' + rot + '):', e && (e.name || e.message) ? (e.name + ' ' + (e.message||'')) : e);
-            decoded = null;
+        // upscale small images
+        const maxSide = Math.max(canvas.width, canvas.height);
+        let scale = 1;
+        if(maxSide < 800) scale = Math.ceil(800 / maxSide);
+        if(scale > 1){
+            const c2 = document.createElement('canvas');
+            c2.width = canvas.width * scale; c2.height = canvas.height * scale;
+            c2.getContext('2d').drawImage(canvas,0,0,c2.width,c2.height);
+            // replace canvas with c2
+            canvas.width = c2.width; canvas.height = c2.height;
+            canvas.getContext('2d').drawImage(c2,0,0);
         }
 
-        if (decoded && (decoded.text || (decoded.getText && decoded.getText()))) {
-            const raw = decoded.text || (decoded.getText && decoded.getText());
-            log('Upload: decode OK ->', raw);
-            await handleDetected(raw);
-            return;
+        // try decode via Quagga.decodeSingle
+        try{
+            const Quagga = await loadQuagga();
+            await new Promise((resolve, reject)=>{
+                Quagga.decodeSingle({
+                    src: canvas.toDataURL(),
+                    numOfWorkers: 0,
+                    decoder: { readers: ["code_128_reader","ean_reader","upc_reader","code_39_reader"] }
+                }, function(result){
+                    if(result && result.codeResult && result.codeResult.code){
+                        log('Upload decode OK', result.codeResult.code);
+                        handleDetected(result.codeResult.code);
+                        resolve(result);
+                    } else {
+                        reject(result);
+                    }
+                });
+            });
+            return; // success -> exit
+        }catch(err){
+            log('Upload attempt failed rotation', rot, err && (err.name||err) );
+            // continue to next rotation
         }
-    } // rotations loop
-
-    // nothing decoded
-    log('Upload: all decode attempts failed');
-    alert('Decode failed — try a clearer photo, more light, or use the generated test barcode');
-});
-
-
-// controls
-btnRetry.addEventListener('click', async () => { await init(); });
-btnSwitch.addEventListener('click', async () => {
-    if (!deviceList.length) await enumerateDevices();
-    if (deviceList.length) {
-        usingIndex = (usingIndex + 1) % deviceList.length;
-        const id = deviceList[usingIndex].deviceId;
-        stopCamera(); await startCamera(id); stopLiveDecode(); await startLiveDecode();
-    } else {
-        log('no video devices to switch');
     }
+    alert('Decode failed — try a clearer photo or use the generated test barcode');
 });
 
-// init flow
-async function init() {
+// retry / switch buttons
+btnRetry.addEventListener('click', async ()=>{ stopLiveQuagga(); await startLiveQuagga(currentDeviceId); });
+btnSwitch.addEventListener('click', async ()=>{
+    // try enumerate devices and cycle to next
+    try{
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cams = devices.filter(d=>d.kind==='videoinput');
+        if(!cams.length){ log('no cameras found'); return; }
+        let idx = cams.findIndex(c=>c.deviceId === currentDeviceId);
+        idx = (idx + 1) % cams.length;
+        currentDeviceId = cams[idx].deviceId;
+        log('Switching to device', cams[idx].label || cams[idx].deviceId);
+        stopLiveQuagga();
+        await startLiveQuagga({ deviceId: currentDeviceId });
+    }catch(e){ log('switch error', e); }
+});
+
+// init
+window.addEventListener('load', async ()=>{
     status.textContent = 'initialising…';
-    log('init');
-    try {
-        await ensureReader();
-        await enumerateDevices();
-        const prefer = await pickDevicePreferRear();
-        await startCamera(prefer);
-        await startLiveDecode();
-    } catch (e) {
-        log('init failed', e);
-        status.textContent = 'init failed';
-    }
-}
-
-// auto-start
-window.addEventListener('load', () => { init().catch(e => log('init exception', e)); });
+    try{
+        // quick test: can we get permission?
+        await navigator.mediaDevices.getUserMedia({ video: true }).then(s=>{ s.getTracks().forEach(t=>t.stop()); }).catch(()=>{});
+    }catch(e){}
+    // start live (prefer rear)
+    try{
+        // choose rear device if available
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const cams = devs.filter(d=>d.kind==='videoinput');
+        if(cams.length){
+            // prefer labels with back/rear/environment
+            const prefer = cams.find(c=>/back|rear|environment|camera 0|camera 1/i.test(c.label));
+            currentDeviceId = prefer ? prefer.deviceId : cams[cams.length-1].deviceId;
+        }
+        await startLiveQuagga(currentDeviceId);
+    }catch(e){ log('init error', e); status.textContent = 'init failed'; }
+});
