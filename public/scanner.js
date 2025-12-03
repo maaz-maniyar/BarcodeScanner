@@ -153,6 +153,43 @@ async function startLiveQuagga(deviceId = null){
     }
 }
 
+// call this when you want the Pi to decode the current camera frame
+async function sendSnapshotToPi() {
+    try {
+        const video = document.getElementById('video');
+        if (!video || video.readyState < 2) { alert('Camera not ready'); return; }
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth || 1280;
+        canvas.height = video.videoHeight || 720;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        // you can crop center if you want smaller image
+        const dataUri = canvas.toDataURL('image/png');
+        // POST to Pi decode endpoint
+        const NGROK = (new URLSearchParams(location.search).get('pi')) || 'https://hypogeal-flynn-clamorous.ngrok-free.dev/decode_image';
+        const res = await fetch(NGROK, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: dataUri })
+        });
+        const json = await res.json();
+        console.log('decode response', json);
+        if (json && json.added) {
+            // success: show the item locally too
+            const name = json.added.name;
+            const price = json.added.price;
+            // show in UI
+            if (typeof showScan === 'function') showScan(name, price);
+            alert('Added: ' + name + ' ₹' + price);
+        } else {
+            alert('No barcode found or decode failed');
+        }
+    } catch (e) {
+        console.error('snapshot send failed', e);
+        alert('Snapshot send failed: ' + e.message);
+    }
+}
+
 // fallback: crop largest box and run decodeSingle on an upscaled crop
 async function tryFallbackDecodeFromQuaggaFrame(data){
     try{

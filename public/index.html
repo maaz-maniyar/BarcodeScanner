@@ -108,6 +108,11 @@
   <button id="btn-switch">Switch camera</button>
 </div>
 
+<button id="btn-capture">Capture & send to Pi</button>
+<script>
+  document.getElementById('btn-capture').addEventListener('click', sendSnapshotToPi);
+</script>
+
 <!-- File upload fallback -->
 <input id="upload" type="file" accept="image/*">
 
