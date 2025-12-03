@@ -1,5 +1,6 @@
 // ==========================================================
 //  scanner.js — FINAL ZXing WASM VERSION (no Quagga, no bugs)
+//  + scan beep integrated (plays when Capture ▶︎ Pi pressed)
 // ==========================================================
 
 import { products } from "./products.js";
@@ -26,8 +27,52 @@ let activeStream = null;
 // ------------------------------------------------------------
 function log(...msg) {
     console.log(...msg);
-    consoleEl.textContent += msg.join(" ") + "\n";
+    if (consoleEl) consoleEl.textContent += msg.join(" ") + "\n";
 }
+
+// ------------------------------------------------------------
+// ---------- Scan beep (WebAudio, no files) ----------
+// minimal, safe WebAudio beep; resumes on first user gesture
+// ------------------------------------------------------------
+let __audioCtx = null;
+function ensureAudioContext() {
+    if (__audioCtx) return;
+    try {
+        __audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
+        __audioCtx = null;
+        console.warn("AudioContext not supported", e);
+    }
+}
+function resumeAudioIfNeeded() {
+    if (!__audioCtx) return;
+    if (__audioCtx.state === "suspended") {
+        __audioCtx.resume().catch(()=>{/* ignore */});
+    }
+}
+function playBeep(freq = 950, lengthMs = 120, gain = 0.08) {
+    ensureAudioContext();
+    if (!__audioCtx) return;
+    try {
+        const now = __audioCtx.currentTime;
+        const o = __audioCtx.createOscillator();
+        const g = __audioCtx.createGain();
+        o.type = "sine";
+        o.frequency.value = freq;
+        g.gain.value = gain;
+        o.connect(g); g.connect(__audioCtx.destination);
+        o.start(now);
+        g.gain.setValueAtTime(gain, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + (lengthMs / 1000));
+        o.stop(now + (lengthMs / 1000) + 0.02);
+    } catch (e) {
+        console.warn("beep failed", e);
+    }
+}
+// resume audio on first real user gesture to satisfy mobile autoplay policies
+['click', 'touchstart'].forEach(ev => {
+    document.addEventListener(ev, () => { ensureAudioContext(); resumeAudioIfNeeded(); }, { once: true, passive: true });
+});
 
 // ------------------------------------------------------------
 // Load ZXing WASM
@@ -47,7 +92,7 @@ async function loadZXing() {
 
 // ------------------------------------------------------------
 // Attach a MediaStream to the <video>
-// ------------------------------------------------------------
+–//------------------------------------------------------------
 async function attachStream(stream) {
     activeStream = stream;
     video.srcObject = stream;
@@ -167,6 +212,11 @@ btnRetry.addEventListener("click", startCamera);
 // Snapshot → Pi
 // ------------------------------------------------------------
 btnSnap.addEventListener("click", async () => {
+    // ensure audio context is resumed and play beep immediately
+    ensureAudioContext();
+    resumeAudioIfNeeded();
+    playBeep();
+
     if (video.readyState < 2) return alert("Camera not ready");
 
     const canvas = document.createElement("canvas");
