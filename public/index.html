@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Smart Cart Scanner</title>
 
   <style>
@@ -17,20 +17,23 @@
       color: #111;
     }
 
+    h2 {
+      margin-top: 10px;
+    }
+
     #video {
       width: 90vw;
       max-width: 420px;
       height: auto;
       background: #000;
-      border-radius: 10px;
+      border-radius: 12px;
       object-fit: cover;
-      position: relative;
+      margin-top: 16px;
       z-index: 1000;
-      margin-top: 14px;
     }
 
     #status {
-      margin-top: 12px;
+      margin-top: 14px;
       font-size: 18px;
       font-weight: 500;
     }
@@ -38,7 +41,9 @@
     #controls {
       margin-top: 16px;
       display: flex;
-      gap: 14px;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
     }
 
     button {
@@ -48,10 +53,11 @@
       border: none;
       background: #0078ff;
       color: white;
+      cursor: pointer;
     }
 
     #items {
-      margin-top: 18px;
+      margin-top: 20px;
       width: 90vw;
       max-width: 420px;
       background: white;
@@ -63,35 +69,35 @@
     #items-list .item {
       display: flex;
       justify-content: space-between;
-      padding: 6px 0;
+      padding: 8px 0;
       border-bottom: 1px solid #eee;
     }
 
     #console {
-      white-space: pre-wrap;
+      margin-top: 20px;
+      width: 90vw;
+      max-width: 420px;
       background: #000;
       color: #0f0;
       padding: 10px;
-      margin-top: 16px;
-      width: 90vw;
-      max-width: 420px;
       font-size: 12px;
+      white-space: pre-wrap;
       border-radius: 6px;
       height: 120px;
       overflow-y: auto;
     }
 
-    /* hidden upload input */
     #upload {
       display: none;
     }
   </style>
 </head>
+
 <body>
 
 <h2>Smart Cart Scanner</h2>
 
-<!-- Video (live preview) -->
+<!-- Camera preview -->
 <video id="video" autoplay playsinline muted></video>
 
 <div id="status">initialising…</div>
@@ -105,7 +111,9 @@
 
 <input id="upload" type="file" accept="image/*" />
 
-<div id="items"><div id="items-list"></div></div>
+<div id="items">
+  <div id="items-list"></div>
+</div>
 
 <div id="console"></div>
 
@@ -113,7 +121,7 @@
 <script src="/products.js"></script>
 
 <!-- Scanner logic -->
-<script src="/scanner.js"></script>
+<script type="module" src="/scanner.js"></script>
 
 </body>
 </html>
