@@ -1,14 +1,42 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Smart Cart Scanner</title>
+  <meta name="description" content="Mobile barcode scanner for Smart Cart" />
+  <style>
+    body{font-family:system-ui,Roboto,Arial;margin:12px;background:#f6f7fb;color:#111;display:flex;flex-direction:column;align-items:center;gap:10px}
+    video, canvas{width:100%;max-width:420px;border-radius:10px;background:#000}
+    #status{padding:8px;border-radius:8px;background:#111;color:#fff;width:100%;max-width:420px;text-align:center}
+    #controls{display:flex;gap:8px;flex-wrap:wrap}
+    button,input{padding:8px;border-radius:8px}
+    #items{width:100%;max-width:420px;background:#fff;border-radius:8px;padding:8px;box-shadow:0 6px 18px rgba(0,0,0,0.06)}
+    .item{display:flex;justify-content:space-between;padding:6px 4px;border-bottom:1px solid #eee}
+    #console{font-family:monospace;background:#000;color:#0f0;padding:8px;border-radius:6px;margin-top:8px;max-height:120px;overflow:auto;width:100%;max-width:420px}
+    a.small{font-size:13px;color:#444}
+  </style>
 </head>
 <body>
-<video id="video" autoplay playsinline muted></video>
-<div id="status">Loading…</div>
+<h3>Smart Cart — Scanner</h3>
 
+<video id="video" autoplay playsinline muted></video>
+<div id="status">initialising…</div>
+
+<div id="controls">
+  <button id="btn-retry">Retry camera</button>
+  <button id="btn-switch">Switch camera</button>
+  <input id="upload" type="file" accept="image/*">
+</div>
+
+<div id="items" hidden>
+  <strong>Recent scans</strong>
+  <div id="items-list"></div>
+</div>
+
+<div id="console" aria-hidden="true"></div>
+
+<!-- main app script -->
 <script type="module" src="/scanner.js"></script>
 </body>
 </html>
