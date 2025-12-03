@@ -110,54 +110,59 @@ function stopLiveDecode() {
     if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
 }
 
-// Robust live decode: native BarcodeDetector first, then ZXing UMD fallback
+// ---------- robust live decode (replace previous startLiveDecode) ----------
 async function startLiveDecode() {
     stopLiveDecode();
+    await ensureReader(); // ensure ZXing loaded (no-op if native path used below)
 
-    // native path
+    // prefer native if available
     if ('BarcodeDetector' in window) {
         try {
             const formats = await BarcodeDetector.getSupportedFormats();
             const detector = new BarcodeDetector({ formats });
             status.textContent = 'scanning (native)…';
+            log('Live: using native BarcodeDetector');
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             liveTimer = setInterval(async () => {
                 try {
                     if (video.readyState < 2) return;
-                    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    // crop center region
+                    const vw = video.videoWidth, vh = video.videoHeight;
+                    const cw = Math.floor(vw * 0.7), ch = Math.floor(vh * 0.5);
+                    const sx = Math.floor((vw - cw) / 2), sy = Math.floor((vh - ch) / 2);
+                    canvas.width = cw; canvas.height = ch;
+                    ctx.drawImage(video, sx, sy, cw, ch, 0, 0, cw, ch);
                     const results = await detector.detect(canvas);
                     if (results && results.length) {
                         const raw = results[0].rawValue || results[0].rawText || results[0].raw;
                         if (raw && raw !== lastDecoded) { lastDecoded = raw; await handleDetected(raw); }
                     }
-                } catch (e) { /* ignore per-frame errors */ }
-            }, 300);
-            log('using native BarcodeDetector');
+                } catch (e) { /* ignore frame errors */ }
+            }, 400);
             return;
         } catch (e) {
-            log('native BarcodeDetector failed, falling back to ZXing', e);
+            log('Live: native failed, falling back to ZXing', e);
         }
     }
 
     // ZXing fallback
-    await ensureReader();
-    if (!codeReader && !(window.ZXing && ZXing.BrowserMultiFormatReader)) {
-        status.textContent = 'no barcode decoder available';
-        log('no ZXing available');
-        return;
-    }
-
     status.textContent = 'scanning (zxing)…';
+    log('Live: using ZXing fallback');
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
+    const throttleMs = 450; // slightly slower so autofocus settles
     liveTimer = setInterval(async () => {
         try {
             if (video.readyState < 2) return;
-            canvas.width = video.videoWidth || 640;
-            canvas.height = video.videoHeight || 480;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+            // crop center region for speed and reliability
+            const cw = Math.floor(vw * 0.7), ch = Math.floor(vh * 0.5);
+            const sx = Math.floor((vw - cw) / 2), sy = Math.floor((vh - ch) / 2);
+            // upscale crop to help decoder
+            const upscale = 2;
+            canvas.width = cw * upscale; canvas.height = ch * upscale;
+            ctx.drawImage(video, sx, sy, cw, ch, 0, 0, canvas.width, canvas.height);
 
             let result = null;
             try {
@@ -171,18 +176,23 @@ async function startLiveDecode() {
                     else if (typeof tmp.decodeOnceFromCanvas === 'function') result = await tmp.decodeOnceFromCanvas(canvas);
                 }
             } catch (err) {
-                // per-frame decode failure — normal
+                // expected many frame failures
+                // log occasional errors to help debug (throttle logs)
+                if (Math.random() < 0.02) log('Live decode frame error (sample):', err && err.name ? err.name : err);
             }
 
             if (result && (result.text || (result.getText && result.getText()))) {
                 const raw = result.text || (result.getText && result.getText());
-                if (raw && raw !== lastDecoded) { lastDecoded = raw; await handleDetected(raw); }
+                if (raw && raw !== lastDecoded) {
+                    lastDecoded = raw;
+                    log('Live: decoded ->', raw);
+                    await handleDetected(raw);
+                }
             }
         } catch (e) {
-            log('live loop err', e);
+            log('Live loop err', e);
         }
-    }, 300);
-    log('using ZXing fallback');
+    }, throttleMs);
 }
 
 // UI helpers
@@ -230,38 +240,65 @@ async function handleDetected(raw) {
     }
 }
 
-// upload decode
+// ---------- robust upload decode (replace existing upload handler) ----------
 upload.addEventListener('change', async (ev) => {
     const f = ev.target.files && ev.target.files[0];
     if (!f) return;
-    const img = new Image(); img.src = URL.createObjectURL(f);
+    log('Upload: file selected', f.name, f.size);
+    const img = new Image();
+    img.src = URL.createObjectURL(f);
     await new Promise(r => img.onload = r);
-    const canvas = document.createElement('canvas'); const scale = 2;
-    canvas.width = img.naturalWidth * scale; canvas.height = img.naturalHeight * scale;
-    const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    try {
-        await ensureReader();
-        let result = null;
-        if (codeReader && typeof codeReader.decodeFromCanvas === 'function') {
-            result = await codeReader.decodeFromCanvas(canvas);
-        } else if (codeReader && typeof codeReader.decodeOnceFromCanvas === 'function') {
-            result = await codeReader.decodeOnceFromCanvas(canvas);
-        } else if (window.ZXing && ZXing.BrowserMultiFormatReader) {
-            const tmp = new ZXing.BrowserMultiFormatReader();
-            if (typeof tmp.decodeFromCanvas === 'function') result = await tmp.decodeFromCanvas(canvas);
-            else if (typeof tmp.decodeOnceFromCanvas === 'function') result = await tmp.decodeOnceFromCanvas(canvas);
+    // try multiple attempts: upscale and rotate if needed
+    const tryRotations = [0, 90, 270];
+    let decoded = null;
+    await ensureReader();
+    for (const rot of tryRotations) {
+        // create canvas with upscale to help decode
+        const scale = 3; // bigger helps ZXing
+        let w = img.naturalWidth;
+        let h = img.naturalHeight;
+        const canvas = document.createElement('canvas');
+        if (rot === 90 || rot === 270) { canvas.width = h * scale; canvas.height = w * scale; }
+        else { canvas.width = w * scale; canvas.height = h * scale; }
+        const ctx = canvas.getContext('2d');
+        // draw rotated
+        ctx.save();
+        if (rot === 90) { ctx.translate(canvas.width, 0); ctx.rotate(Math.PI/2); ctx.drawImage(img, 0, 0, h*scale, w*scale); }
+        else if (rot === 270) { ctx.translate(0, canvas.height); ctx.rotate(-Math.PI/2); ctx.drawImage(img, 0, 0, h*scale, w*scale); }
+        else { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); }
+        ctx.restore();
+
+        log(`Upload: trying rotation ${rot}°, canvas ${canvas.width}x${canvas.height}`);
+
+        // try codeReader methods
+        try {
+            if (codeReader && typeof codeReader.decodeOnceFromCanvas === 'function') {
+                decoded = await codeReader.decodeOnceFromCanvas(canvas).catch(e => { throw e; });
+            } else if (codeReader && typeof codeReader.decodeFromCanvas === 'function') {
+                decoded = await codeReader.decodeFromCanvas(canvas).catch(e => { throw e; });
+            } else if (window.ZXing && ZXing.BrowserMultiFormatReader) {
+                const tmp = new ZXing.BrowserMultiFormatReader();
+                if (typeof tmp.decodeFromCanvas === 'function') decoded = await tmp.decodeFromCanvas(canvas);
+                else if (typeof tmp.decodeOnceFromCanvas === 'function') decoded = await tmp.decodeOnceFromCanvas(canvas);
+            }
+        } catch (e) {
+            log('Upload: decode attempt failed (rotation ' + rot + '):', e && (e.name || e.message) ? (e.name + ' ' + (e.message||'')) : e);
+            decoded = null;
         }
-        if (result && (result.text || (result.getText && result.getText()))) {
-            const raw = result.text || (result.getText && result.getText());
+
+        if (decoded && (decoded.text || (decoded.getText && decoded.getText()))) {
+            const raw = decoded.text || (decoded.getText && decoded.getText());
+            log('Upload: decode OK ->', raw);
             await handleDetected(raw);
-        } else {
-            throw new Error('no decode result');
+            return;
         }
-    } catch (e) {
-        log('upload decode failed', e);
-        alert('decode failed: ' + (e && e.name ? e.name : e));
-    }
+    } // rotations loop
+
+    // nothing decoded
+    log('Upload: all decode attempts failed');
+    alert('Decode failed — try a clearer photo, more light, or use the generated test barcode');
 });
+
 
 // controls
 btnRetry.addEventListener('click', async () => { await init(); });
